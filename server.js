@@ -20,20 +20,31 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server });
 const clients = new Set();
 
+function log(...parts) {
+  console.log(new Date().toISOString(), ...parts);
+}
+
 function safeSend(ws, payload) {
   if (ws.readyState !== WebSocket.OPEN) {
     return;
   }
 
-  ws.send(JSON.stringify(payload));
+  const encoded = JSON.stringify(payload);
+  log('SEND ->', ws.meta?.name || 'unknown', encoded);
+  ws.send(encoded);
 }
 
 function broadcastToChannel(channel, payload) {
+  const targets = [];
+
   for (const client of clients) {
     if (client.meta?.channel === channel) {
+      targets.push(client.meta?.name || 'unknown');
       safeSend(client, payload);
     }
   }
+
+  log('BROADCAST', `channel=${channel}`, `targets=${targets.join(',') || 'none'}`);
 }
 
 function getChannelMembers(channel) {
@@ -51,8 +62,15 @@ function getChannelMembers(channel) {
 function relayMessage(ws, data) {
   const meta = ws.meta;
   if (!meta?.channel || !meta?.name || !data.topic) {
+    log('SKIP relay due to missing meta/topic', JSON.stringify({
+      channel: meta?.channel,
+      name: meta?.name,
+      topic: data.topic
+    }));
     return;
   }
+
+  log('RELAY request', `from=${meta.name}`, `channel=${meta.channel}`, `topic=${data.topic}`, `message=${JSON.stringify(data.message)}`);
 
   if (data.topic === 'list') {
     const members = getChannelMembers(meta.channel);
@@ -73,49 +91,58 @@ function relayMessage(ws, data) {
   });
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   ws.meta = {
     channel: null,
     name: null,
     lastMessage: 0
   };
+
   clients.add(ws);
-  console.log('Client connected');
+  log('CONNECT', req.socket.remoteAddress, `clients=${clients.size}`);
 
   ws.on('message', (rawMessage) => {
     const text = rawMessage.toString();
-    console.log('Message:', text);
+    log('RAW <-', text);
 
     let data;
     try {
       data = JSON.parse(text);
     } catch (error) {
-      console.error('Invalid JSON:', error.message);
+      log('INVALID JSON', error.message);
       return;
     }
+
+    log('PARSED', `type=${data.type}`, `topic=${data.topic || 'none'}`);
 
     if (data.type === 'init') {
       ws.meta.channel = data.channel || null;
       ws.meta.name = data.name || null;
       ws.meta.lastMessage = data.lastMessage || 0;
-
-      console.log(`Initialized ${ws.meta.name || 'unknown'} in channel ${ws.meta.channel || 'none'}`);
+      log('INIT', `name=${ws.meta.name}`, `channel=${ws.meta.channel}`, `lastMessage=${ws.meta.lastMessage}`);
       return;
     }
 
     if (data.type === 'message') {
       relayMessage(ws, data);
+      return;
     }
+
+    log('UNKNOWN TYPE', JSON.stringify(data));
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
     clients.delete(ws);
-    console.log('Client disconnected');
+    log('CLOSE', `code=${code}`, `reason=${reason.toString()}`, `clients=${clients.size}`, `name=${ws.meta?.name || 'unknown'}`);
+  });
+
+  ws.on('error', (error) => {
+    log('SOCKET ERROR', error.message);
   });
 });
 
 const PORT = process.env.PORT || 8008;
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`BotServer running on port ${PORT}`);
+  log(`BotServer running on port ${PORT}`);
 });
